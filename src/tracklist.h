@@ -37,6 +37,7 @@ public:
         std::string CodecString;
         int Disposition;
         std::string DispositionString;
+        int SARNum, SARDen;
     };
 private:
     AVFormatContext *FormatContext = nullptr;

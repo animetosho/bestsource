@@ -43,13 +43,17 @@ void BestTrackList::OpenFile(const std::filesystem::path &SourceFile, const std:
     }
 
     for (unsigned int i = 0; i < FormatContext->nb_streams; i++) {
+        const AVStream *stream = FormatContext->streams[i];
         TrackInfo TI = {};
-        TI.MediaType = FormatContext->streams[i]->codecpar->codec_type;
-        TI.MediaTypeString = av_get_media_type_string(FormatContext->streams[i]->codecpar->codec_type);
-        TI.Codec = FormatContext->streams[i]->codecpar->codec_id;
-        TI.CodecString = avcodec_get_name(FormatContext->streams[i]->codecpar->codec_id);
+        TI.MediaType = stream->codecpar->codec_type;
+        TI.MediaTypeString = av_get_media_type_string(stream->codecpar->codec_type);
+        TI.Codec = stream->codecpar->codec_id;
+        TI.CodecString = avcodec_get_name(stream->codecpar->codec_id);
 
-        int Disposition = FormatContext->streams[i]->disposition;
+        TI.SARNum = stream->sample_aspect_ratio.num;
+        TI.SARDen = stream->sample_aspect_ratio.den;
+
+        int Disposition = stream->disposition;
         TI.Disposition = Disposition;
 
         while (const char *DispPart = av_disposition_to_string(Disposition)) {

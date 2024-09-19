@@ -382,6 +382,8 @@ static void VS_CC GetTrackInfo(const VSMap *In, VSMap *Out, void *, VSCore *core
             vsapi->mapSetData(Out, "codecstr", TI.CodecString.c_str(), -1, dtUtf8, maAppend);
             vsapi->mapSetInt(Out, "disposition", TI.Disposition, maAppend);
             vsapi->mapSetData(Out, "dispositionstr", TI.DispositionString.c_str(), -1, dtUtf8, maAppend);
+            vsapi->mapSetInt(Out, "sarnum", TI.SARNum, maAppend);
+            vsapi->mapSetInt(Out, "sarden", TI.SARDen, maAppend);
         }
     } catch (BestSourceException &e) {
         vsapi->mapSetError(Out, (std::string("TrackInfo: ") + e.what()).c_str());
