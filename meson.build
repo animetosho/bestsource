@@ -69,7 +69,7 @@ if meson.get_compiler('cpp').get_linker_id() in ['ld.bfd', 'ld.gold', 'ld.mold']
     link_args += ['-Wl,-Bsymbolic']
 endif
 
-libbestsource = library('libbestsource', api_sources,
+libbestsource = static_library('libbestsource', api_sources,
     dependencies: deps,
     install: true,
     link_args: link_args,
