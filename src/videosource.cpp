@@ -283,13 +283,9 @@ void LWVideoDecoder::SetFrameNumber(int64_t N) {
     CurrentFrame = N;
 }
 
-void LWVideoDecoder::GetVideoProperties(BSVideoProperties &VP) {
-    assert(CurrentFrame == 0);
+void LWVideoDecoder::GetVideoPropertiesFromFrame(BSVideoProperties &VP, AVFrame *PropFrame) const {
     VP = {};
-    AVFrame *PropFrame = GetNextFrame();
     assert(PropFrame);
-    if (!PropFrame)
-        return;
 
     VP.VF.Set(av_pix_fmt_desc_get(static_cast<AVPixelFormat>(PropFrame->format)));
     VP.FieldBased = !!(PropFrame->flags & AV_FRAME_FLAG_INTERLACED);
@@ -409,6 +405,17 @@ void LWVideoDecoder::GetVideoProperties(BSVideoProperties &VP) {
                 VP.Rotation += 360;
         }
     }
+}
+
+void LWVideoDecoder::GetVideoProperties(BSVideoProperties &VP) {
+    assert(CurrentFrame == 0);
+    AVFrame *PropFrame = GetNextFrame();
+    assert(PropFrame);
+    if (!PropFrame)
+        return;
+
+    GetVideoPropertiesFromFrame(VP, PropFrame);
+    av_frame_free(&PropFrame);
 }
 
 AVFrame *LWVideoDecoder::GetNextFrame() {
@@ -906,7 +913,12 @@ BestVideoSource::BestVideoSource(const std::filesystem::path &SourceFile, const 
 
     std::unique_ptr<LWVideoDecoder> Decoder(new LWVideoDecoder(Source, HWDevice, ExtraHWFrames, VideoTrack, VariableFormat, Threads, LAVFOptions));
 
-    Decoder->GetVideoProperties(VP);
+    AVFrame *PropFrame = Decoder->GetNextFrame();
+    if (PropFrame) {
+        Decoder->GetVideoPropertiesFromFrame(VP, PropFrame);
+        FrameCache.CacheFrame(0, PropFrame);
+    }
+
     VideoTrack = Decoder->GetTrack();
     FileSize = Decoder->GetSourceSize();
 

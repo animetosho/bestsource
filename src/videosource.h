@@ -121,6 +121,7 @@ public:
     [[nodiscard]] int GetTrack() const; // Useful when opening nth video track to get the actual number
     [[nodiscard]] int64_t GetFrameNumber() const; // The frame you will get when calling GetNextFrame()
     void SetFrameNumber(int64_t N); // Use after seeking to update internal frame number
+    void GetVideoPropertiesFromFrame(BSVideoProperties &VP, AVFrame *PropFrame) const;
     void GetVideoProperties(BSVideoProperties &VP); // Decodes one frame and advances the position to retrieve the full properties, only call directly after creation
     [[nodiscard]] AVFrame *GetNextFrame();
     bool SkipFrames(int64_t Count);
