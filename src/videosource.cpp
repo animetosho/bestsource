@@ -309,17 +309,9 @@ void LWVideoDecoder::SetFrameNumber(int64_t N) {
     CurrentFrame = N;
 }
 
-void LWVideoDecoder::GetVideoPropertiesFromFrame(BSVideoProperties &VP, AVFrame *PropFrame) const {
-    VP = {};
-    assert(PropFrame);
-
-    VP.VF.Set(av_pix_fmt_desc_get(static_cast<AVPixelFormat>(PropFrame->format)));
-    VP.FieldBased = !!(PropFrame->flags & AV_FRAME_FLAG_INTERLACED);
-    VP.TFF = !!(PropFrame->flags & AV_FRAME_FLAG_TOP_FIELD_FIRST);
+void LWVideoDecoder::FillVideoPropertiesFromContext(BSVideoProperties &VP) {
     VP.Width = CodecContext->width;
     VP.Height = CodecContext->height;
-    VP.SSModWidth = VP.Width - (VP.Width % (1 << VP.VF.SubSamplingW));
-    VP.SSModHeight = VP.Height - (VP.Height % (1 << VP.VF.SubSamplingH));
 
     VP.FPS = CodecContext->framerate;
     // Set the framerate from the container if the codec framerate is invalid
@@ -343,9 +335,6 @@ void LWVideoDecoder::GetVideoPropertiesFromFrame(BSVideoProperties &VP, AVFrame 
         VP.FPS.Den = 1;
         VP.FPS.Num = 30;
     }
-
-    if (PropFrame->pts != AV_NOPTS_VALUE)
-        VP.StartTime = (static_cast<double>(FormatContext->streams[TrackNumber]->time_base.num) * PropFrame->pts) / FormatContext->streams[TrackNumber]->time_base.den;
 
     // Set AR variables
     VP.SAR = CodecContext->sample_aspect_ratio;
@@ -433,6 +422,19 @@ void LWVideoDecoder::GetVideoPropertiesFromFrame(BSVideoProperties &VP, AVFrame 
     }
 }
 
+void LWVideoDecoder::FillVideoPropertiesFromFrame(BSVideoProperties &VP, AVFrame *PropFrame) const {
+    assert(PropFrame);
+
+    VP.VF.Set(av_pix_fmt_desc_get(static_cast<AVPixelFormat>(PropFrame->format)));
+    VP.SSModWidth = CodecContext->width - (CodecContext->width % (1 << VP.VF.SubSamplingW));
+    VP.SSModHeight = CodecContext->height - (CodecContext->height % (1 << VP.VF.SubSamplingH));
+    VP.FieldBased = !!(PropFrame->flags & AV_FRAME_FLAG_INTERLACED);
+    VP.TFF = !!(PropFrame->flags & AV_FRAME_FLAG_TOP_FIELD_FIRST);
+
+    if (PropFrame->pts != AV_NOPTS_VALUE)
+        VP.StartTime = (static_cast<double>(FormatContext->streams[TrackNumber]->time_base.num) * PropFrame->pts) / FormatContext->streams[TrackNumber]->time_base.den;
+}
+
 void LWVideoDecoder::GetVideoProperties(BSVideoProperties &VP) {
     assert(CurrentFrame == 0);
     AVFrame *PropFrame = GetNextFrame();
@@ -440,7 +442,9 @@ void LWVideoDecoder::GetVideoProperties(BSVideoProperties &VP) {
     if (!PropFrame)
         return;
 
-    GetVideoPropertiesFromFrame(VP, PropFrame);
+    VP = {};
+    FillVideoPropertiesFromContext(VP);
+    FillVideoPropertiesFromFrame(VP, PropFrame);
     av_frame_free(&PropFrame);
 }
 
@@ -945,7 +949,8 @@ BestVideoSource::BestVideoSource(const std::filesystem::path &SourceFile, const 
 
     AVFrame *PropFrame = Decoder->GetNextFrame();
     if (PropFrame) {
-        Decoder->GetVideoPropertiesFromFrame(VP, PropFrame);
+        Decoder->FillVideoPropertiesFromContext(VP);
+        Decoder->FillVideoPropertiesFromFrame(VP, PropFrame);
         FrameCache.CacheFrame(0, PropFrame);
     }
 
@@ -956,7 +961,7 @@ BestVideoSource::BestVideoSource(const std::filesystem::path &SourceFile, const 
         if (!IndexTrack(Progress))
             throw BestSourceException("Indexing of '" + Source.u8string() + "' track #" + std::to_string(VideoTrack) + " failed");
 
-        if (CacheMode == bcmAlwaysWrite || (CacheMode == bcmAuto && TrackIndex.Frames.size() >= 100)) {
+        if (CacheMode == bcmAlwaysWrite || (CacheMode == bcmAuto && TrackIndex.Frames.size() >= SeekSearch)) {
             if (!WriteVideoTrackIndex(CachePath))
                 throw BestSourceException("Failed to write index to '" + CachePath.u8string() + "' for track #" + std::to_string(VideoTrack));
         }
@@ -1054,6 +1059,12 @@ void BestVideoSource::SetSeekPreRoll(int64_t Frames) {
     PreRoll = Frames;
 }
 
+void BestVideoSource::SetSeekSearch(int64_t Frames) {
+    if (Frames < 1)
+        throw BestSourceException("SeekSearch must be greater than 0");
+    SeekSearch = Frames;
+}
+
 bool BestVideoSource::IndexTrack(const ProgressFunction &Progress) {
     std::unique_ptr<LWVideoDecoder> Decoder(new LWVideoDecoder(Source, HWDevice, ExtraHWFrames, VideoTrack, VariableFormat, Threads, LAVFOptions, LAVFStreamOptions, LAVCOptions));
 
@@ -1108,12 +1119,12 @@ const BSVideoProperties &BestVideoSource::GetVideoProperties() const {
 // Short algorithm summary
 // 1. If a current decoder is close to the requested frame simply start from there
 //    Determine if a decoder is "close" based on whether or not it is already in the optimal zone based on the existing keyframes
-// 2. If a decoder isn't nearby and the seek destination is within the first 100 frames simply start with a fresh decoder to avoid the seek to start issue (technically almost always fresh)
-// 3. Seek with an existing or new decoder. Seek to the nearest keyframe at or before frame N-preroll using PTS. If no such point exists more than 100 frames after the start don't seek.
+// 2. If a decoder isn't nearby and the seek destination is within the first <SeekSearch> frames simply start with a fresh decoder to avoid the seek to start issue (technically almost always fresh)
+// 3. Seek with an existing or new decoder. Seek to the nearest keyframe at or before frame N-preroll using PTS. If no such point exists more than <SeekSearch> frames after the start don't seek.
 //    After seeking match the hash of the decoded frame. For duplicate hashes match a string of up to 10 frame hashes.
 // 4. If the frame is determined to not exist, be beyond the target frame to decode or simply in a string of frames that aren't uniquely identifiable by hashes mark the keyframe as unusable and retry seeking to
-//    at least 100 frames earlier.
-// 5. If linear decoding after seeking fails handle it the same way as #4 and flag it as a bad seek point and retry from at least 100 frames earlier.
+//    at least <SeekSearch> frames earlier.
+// 5. If linear decoding after seeking fails handle it the same way as #4 and flag it as a bad seek point and retry from at least <SeekSearch> frames earlier.
 
 BestVideoFrame *BestVideoSource::GetFrame(int64_t N, bool Linear) {
     if (N < 0 || N >= VP.NumFrames)
@@ -1138,7 +1149,7 @@ void BestVideoSource::SetLinearMode() {
 }
 
 int64_t BestVideoSource::GetSeekFrame(int64_t N) {
-    for (int64_t i = N - PreRoll; i >= 100; i--) {
+    for (int64_t i = N - PreRoll; i >= SeekSearch; i--) {
         if (TrackIndex.Frames[i].KeyFrame && TrackIndex.Frames[i].PTS != AV_NOPTS_VALUE && !BadSeekLocations.count(i))
             return i;
     }
@@ -1201,9 +1212,9 @@ BestVideoFrame *BestVideoSource::SeekAndDecode(int64_t N, int64_t SeekFrame, std
             BadSeekLocations.insert(SeekFrame);
             BSDebugPrint("No frame could be decoded after seeking, added as bad seek location", N, SeekFrame);
             if (Depth < RetrySeekAttempts) {
-                int64_t SeekFrameNext = GetSeekFrame(SeekFrame - 100);
+                int64_t SeekFrameNext = GetSeekFrame(SeekFrame - SeekSearch);
                 BSDebugPrint("Retrying seeking with", N, SeekFrameNext);
-                if (SeekFrameNext < 100) { // #2 again
+                if (SeekFrameNext < SeekSearch) { // #2 again
                     Decoder.reset();
                     return GetFrameLinearInternal(N);
                 } else {
@@ -1260,9 +1271,9 @@ BestVideoFrame *BestVideoSource::SeekAndDecode(int64_t N, int64_t SeekFrame, std
             BadSeekLocations.insert(SeekFrame);
             MatchFrames.clear();
             if (Depth < RetrySeekAttempts) {
-                int64_t SeekFrameNext = GetSeekFrame(SeekFrame - 100);
+                int64_t SeekFrameNext = GetSeekFrame(SeekFrame - SeekSearch);
                 BSDebugPrint("Retrying seeking with", N, SeekFrameNext);
-                if (SeekFrameNext < 100) { // #2 again
+                if (SeekFrameNext < SeekSearch) { // #2 again
                     Decoder.reset();
                     return GetFrameLinearInternal(N);
                 } else {
@@ -1280,8 +1291,8 @@ BestVideoFrame *BestVideoSource::SeekAndDecode(int64_t N, int64_t SeekFrame, std
             int64_t MatchedN = *Matches.begin();
 
 #ifndef NDEBUG
-            if (MatchedN < 100)
-                BSDebugPrint("Seek destination determined to be within 100 frames of start, this was unexpected", N, MatchedN);
+            if (MatchedN < SeekSearch)
+                BSDebugPrint("Seek destination determined to be within <SeekSearch> frames of start, this was unexpected", N, MatchedN, SeekSearch);
 #endif
 
             Decoder->SetFrameNumber(MatchedN + MatchFrames.size());
@@ -1321,10 +1332,10 @@ BestVideoFrame *BestVideoSource::GetFrameInternal(int64_t N) {
     if (LinearMode)
         return GetFrameLinearInternal(N);
 
-    // #2 If the seek limit is less than 100 frames away from the start see #2 and do linear decoding
+    // #2 If the seek limit is less than <SeekSearch> frames away from the start see #2 and do linear decoding
     int64_t SeekFrame = GetSeekFrame(N);
 
-    if (SeekFrame < 100)
+    if (SeekFrame < SeekSearch)
         return GetFrameLinearInternal(N);
 
     // # 1 A suitable linear decoder exists and seeking is out of the question
@@ -1397,9 +1408,9 @@ BestVideoFrame *BestVideoSource::GetFrameLinearInternal(int64_t N, int64_t SeekF
                     assert(SeekFrame >= 0);
                     BadSeekLocations.insert(SeekFrame);
                     if (Depth < RetrySeekAttempts) {
-                        int64_t SeekFrameNext = GetSeekFrame(SeekFrame - 100);
+                        int64_t SeekFrameNext = GetSeekFrame(SeekFrame - SeekSearch);
                         BSDebugPrint("Retrying seeking with", N, SeekFrameNext);
-                        if (SeekFrameNext < 100) { // #2 again
+                        if (SeekFrameNext < SeekSearch) { // #2 again
                             Decoder.reset();
                             return GetFrameLinearInternal(N);
                         } else {

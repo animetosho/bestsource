@@ -121,6 +121,7 @@ public:
     [[nodiscard]] int GetTrack() const; // Useful when opening nth video track to get the actual number
     [[nodiscard]] int64_t GetFrameNumber() const; // The frame you will get when calling GetNextFrame()
     void SetFrameNumber(int64_t N); // Use after seeking to update internal frame number
+    void GetVideoPropertiesFromContext(BSVideoProperties &VP) const;
     void GetVideoPropertiesFromFrame(BSVideoProperties &VP, AVFrame *PropFrame) const;
     void GetVideoProperties(BSVideoProperties &VP); // Decodes one frame and advances the position to retrieve the full properties, only call directly after creation
     [[nodiscard]] AVFrame *GetNextFrame();
@@ -257,6 +258,7 @@ private:
     uint64_t DecoderLastUse[MaxVideoSources] = {};
     std::unique_ptr<LWVideoDecoder> Decoders[MaxVideoSources];
     int64_t PreRoll = 20;
+    int64_t SeekSearch = 100;
     int64_t FileSize = -1;
     static constexpr size_t RetrySeekAttempts = 10;
     std::set<int64_t> BadSeekLocations;
@@ -273,6 +275,7 @@ public:
     [[nodiscard]] int GetTrack() const; // Useful when opening nth video track to get the actual number
     void SetMaxCacheSize(size_t Bytes); /* Default max size is 1GB */
     void SetSeekPreRoll(int64_t Frames); /* The number of frames to cache before the position being fast forwarded to */
+    void SetSeekSearch(int64_t Frames); /* The number of frames to look back when trying to find a seek point */
     [[nodiscard]] const BSVideoProperties &GetVideoProperties() const;
     [[nodiscard]] BestVideoFrame *GetFrame(int64_t N, bool Linear = false);
     [[nodiscard]] BestVideoFrame *GetFrameWithRFF(int64_t N, bool Linear = false);
