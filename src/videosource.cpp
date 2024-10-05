@@ -309,7 +309,7 @@ void LWVideoDecoder::SetFrameNumber(int64_t N) {
     CurrentFrame = N;
 }
 
-void LWVideoDecoder::FillVideoPropertiesFromContext(BSVideoProperties &VP) {
+void LWVideoDecoder::FillVideoPropertiesFromContext(BSVideoProperties &VP) const {
     VP.Width = CodecContext->width;
     VP.Height = CodecContext->height;
 
@@ -948,23 +948,30 @@ BestVideoSource::BestVideoSource(const std::filesystem::path &SourceFile, const 
     std::unique_ptr<LWVideoDecoder> Decoder(new LWVideoDecoder(Source, HWDevice, ExtraHWFrames, VideoTrack, VariableFormat, Threads, LAVFOptions, LAVFStreamOptions, LAVCOptions));
 
     AVFrame *PropFrame = Decoder->GetNextFrame();
-    if (PropFrame) {
-        Decoder->FillVideoPropertiesFromContext(VP);
-        Decoder->FillVideoPropertiesFromFrame(VP, PropFrame);
-        FrameCache.CacheFrame(0, PropFrame);
-    }
+    if (!PropFrame)
+        throw BestSourceException("Failed to decode first frame of '" + Source.u8string() + "'");
 
+    Decoder->FillVideoPropertiesFromContext(VP);
+    Decoder->FillVideoPropertiesFromFrame(VP, PropFrame);
     VideoTrack = Decoder->GetTrack();
     FileSize = Decoder->GetSourceSize();
 
     if (CacheMode == bcmDisable || !ReadVideoTrackIndex(CachePath)) {
-        if (!IndexTrack(Progress))
+        // add first frame to the index
+        TrackIndex.Frames.push_back({ PropFrame->pts, PropFrame->repeat_pict, !!(PropFrame->flags & AV_FRAME_FLAG_KEY), !!(PropFrame->flags & AV_FRAME_FLAG_TOP_FIELD_FIRST), GetHash(PropFrame) });
+        TrackIndex.LastFrameDuration = PropFrame->duration;
+        FrameCache.CacheFrame(0, PropFrame);
+
+        if (!IndexTrack(Decoder, Progress))
             throw BestSourceException("Indexing of '" + Source.u8string() + "' track #" + std::to_string(VideoTrack) + " failed");
 
-        if (CacheMode == bcmAlwaysWrite || (CacheMode == bcmAuto && TrackIndex.Frames.size() >= SeekSearch)) {
+        if (CacheMode == bcmAlwaysWrite || (CacheMode == bcmAuto && static_cast<int64_t>(TrackIndex.Frames.size()) >= SeekSearch)) {
             if (!WriteVideoTrackIndex(CachePath))
                 throw BestSourceException("Failed to write index to '" + CachePath.u8string() + "' for track #" + std::to_string(VideoTrack));
         }
+    } else {
+        FrameCache.CacheFrame(0, PropFrame);
+        Decoders[0] = std::move(Decoder); // this may be re-usable
     }
 
     if (TrackIndex.Frames[0].RepeatPict < 0)
@@ -1041,8 +1048,6 @@ BestVideoSource::BestVideoSource(const std::filesystem::path &SourceFile, const 
         RFFState = RFFStateEnum::Unused;
     else
         VP.FPS = OriginalFPS; // Restore the original FPS since it's generally always correct for files with RFF set
-
-    Decoders[0] = std::move(Decoder);
 }
 
 int BestVideoSource::GetTrack() const {
@@ -1065,9 +1070,7 @@ void BestVideoSource::SetSeekSearch(int64_t Frames) {
     SeekSearch = Frames;
 }
 
-bool BestVideoSource::IndexTrack(const ProgressFunction &Progress) {
-    std::unique_ptr<LWVideoDecoder> Decoder(new LWVideoDecoder(Source, HWDevice, ExtraHWFrames, VideoTrack, VariableFormat, Threads, LAVFOptions, LAVFStreamOptions, LAVCOptions));
-
+bool BestVideoSource::IndexTrack(std::unique_ptr<LWVideoDecoder> &Decoder, const ProgressFunction &Progress) {
     int64_t FileSize = Progress ? Decoder->GetSourceSize() : -1;
 
     TrackIndex.LastFrameDuration = 0;
@@ -1099,7 +1102,11 @@ bool BestVideoSource::IndexTrack(const ProgressFunction &Progress) {
         TrackIndex.LastFrameDuration = F->duration;
         //}
 
-        av_frame_free(&F);
+        if (FrameCache.IsFull())
+            av_frame_free(&F);
+        else
+            FrameCache.CacheFrame(TrackIndex.Frames.size()-1, F);
+
         if (Progress) {
             if (!Progress(VideoTrack, Decoder->GetSourcePostion(), FileSize))
                 throw BestSourceException("Indexing canceled by user");

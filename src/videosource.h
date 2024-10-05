@@ -121,8 +121,8 @@ public:
     [[nodiscard]] int GetTrack() const; // Useful when opening nth video track to get the actual number
     [[nodiscard]] int64_t GetFrameNumber() const; // The frame you will get when calling GetNextFrame()
     void SetFrameNumber(int64_t N); // Use after seeking to update internal frame number
-    void GetVideoPropertiesFromContext(BSVideoProperties &VP) const;
-    void GetVideoPropertiesFromFrame(BSVideoProperties &VP, AVFrame *PropFrame) const;
+    void FillVideoPropertiesFromContext(BSVideoProperties &VP) const;
+    void FillVideoPropertiesFromFrame(BSVideoProperties &VP, AVFrame *PropFrame) const;
     void GetVideoProperties(BSVideoProperties &VP); // Decodes one frame and advances the position to retrieve the full properties, only call directly after creation
     [[nodiscard]] AVFrame *GetNextFrame();
     bool SkipFrames(int64_t Count);
@@ -229,6 +229,9 @@ private:
         void Clear();
         void SetMaxSize(size_t Bytes);
         void CacheFrame(int64_t FrameNumber, AVFrame *Frame); // Takes ownership of Frame
+        [[nodiscard]] inline bool IsFull() const {
+            return Size >= MaxSize;
+        }
         [[nodiscard]] BestVideoFrame *GetFrame(int64_t N);
     };
 
@@ -267,7 +270,7 @@ private:
     [[nodiscard]] BestVideoFrame *SeekAndDecode(int64_t N, int64_t SeekFrame, std::unique_ptr<LWVideoDecoder> &Decoder, size_t Depth = 0);
     [[nodiscard]] BestVideoFrame *GetFrameInternal(int64_t N);
     [[nodiscard]] BestVideoFrame *GetFrameLinearInternal(int64_t N, int64_t SeekFrame = -1, size_t Depth = 0, bool ForceUnseeked = false);
-    [[nodiscard]] bool IndexTrack(const ProgressFunction &Progress = nullptr);
+    [[nodiscard]] bool IndexTrack(std::unique_ptr<LWVideoDecoder> &Decoder, const ProgressFunction &Progress = nullptr);
     bool InitializeRFF();
     bool NearestCommonFrameRate(BSRational &FPS);
 public:
