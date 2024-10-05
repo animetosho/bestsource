@@ -420,6 +420,13 @@ void LWVideoDecoder::FillVideoPropertiesFromContext(BSVideoProperties &VP) const
                 VP.Rotation += 360;
         }
     }
+    
+    VP.VF.Set(av_pix_fmt_desc_get(CodecContext->pix_fmt));
+    VP.SSModWidth = CodecContext->width - (CodecContext->width % (1 << VP.VF.SubSamplingW));
+    VP.SSModHeight = CodecContext->height - (CodecContext->height % (1 << VP.VF.SubSamplingH));
+    VP.FieldBased = (CodecContext->field_order != AV_FIELD_PROGRESSIVE && CodecContext->field_order != AV_FIELD_UNKNOWN);
+    VP.TFF = (CodecContext->field_order == AV_FIELD_TT || CodecContext->field_order == AV_FIELD_TB);
+    VP.StartTime = 0;
 }
 
 void LWVideoDecoder::FillVideoPropertiesFromFrame(BSVideoProperties &VP, AVFrame *PropFrame) const {
@@ -1594,7 +1601,7 @@ bool BestVideoSource::WriteVideoTrackIndex(const std::filesystem::path &CachePat
         WriteInt64(F, PTSPredictor);
 
         for (const auto &Iter : Dict)
-            fwrite(Iter.first.data(), 1, Iter.first.size(), F.get());
+            WriteBytes(F, Iter.first.data(), Iter.first.size());
 
         LastPTSValue = PTSPredictor;
         for (const auto &Iter : TrackIndex.Frames) {
@@ -1606,13 +1613,13 @@ bool BestVideoSource::WriteVideoTrackIndex(const std::filesystem::path &CachePat
             }
 
             WriteByte(F, Dict[GetVideoCompArray(PTS, Iter.RepeatPict, Iter.KeyFrame, Iter.TFF)]);
-            fwrite(Iter.Hash.data(), 1, Iter.Hash.size(), F.get());
+            WriteBytes(F, Iter.Hash.data(), Iter.Hash.size());
         }
     } else {
         WriteInt(F, 0);
 
         for (const auto &Iter : TrackIndex.Frames) {
-            fwrite(Iter.Hash.data(), 1, Iter.Hash.size(), F.get());
+            WriteBytes(F, Iter.Hash.data(), Iter.Hash.size());
             WriteInt64(F, Iter.PTS);
             WriteInt(F, Iter.RepeatPict);
             WriteByte(F, static_cast<uint8_t>(Iter.KeyFrame) | (static_cast<uint8_t>(Iter.TFF) << 1));
@@ -1672,14 +1679,14 @@ bool BestVideoSource::ReadVideoTrackIndex(const std::filesystem::path &CachePath
                 FI.PTS += LastPTSValue;
                 LastPTSValue = FI.PTS;
             }
-            if (fread(FI.Hash.data(), 1, FI.Hash.size(), F.get()) != FI.Hash.size())
+            if (!ReadBytes(F, FI.Hash.data(), FI.Hash.size()))
                 return false;
             TrackIndex.Frames.push_back(FI);
         }
     } else {
         for (int i = 0; i < NumFrames; i++) {
             FrameInfo FI = {};
-            if (fread(FI.Hash.data(), 1, FI.Hash.size(), F.get()) != FI.Hash.size())
+            if (!ReadBytes(F, FI.Hash.data(), FI.Hash.size()))
                 return false;
             FI.PTS = ReadInt64(F);
             FI.RepeatPict = ReadInt(F);

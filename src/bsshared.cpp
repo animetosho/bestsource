@@ -150,6 +150,10 @@ void WriteString(file_ptr_t &F, const std::string &Value) {
     fwrite(Value.c_str(), 1, Value.size(), F.get());
 }
 
+void WriteBytes(file_ptr_t &F, const uint8_t *data, size_t size) {
+    fwrite(data, 1, size, F.get());
+}
+
 void WriteBSHeader(file_ptr_t &F, bool Video) {
     fwrite(Video ? "BS2V" : "BS2A", 1, 4, F.get());
     WriteInt(F, (BEST_SOURCE_VERSION_MAJOR << 16) | BEST_SOURCE_VERSION_MINOR);
@@ -198,6 +202,10 @@ std::string ReadString(file_ptr_t &F) {
         return S;
     else
         return "";
+}
+
+bool ReadBytes(file_ptr_t &F, uint8_t *data, size_t size) {
+    return fread(data, 1, size, F.get()) == size;
 }
 
 bool ReadCompareInt(file_ptr_t &F, int Value) {
