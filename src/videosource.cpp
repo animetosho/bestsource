@@ -932,7 +932,7 @@ bool BestVideoSource::NearestCommonFrameRate(BSRational &FPS) {
     return false;
 }
 
-BestVideoSource::BestVideoSource(const std::filesystem::path &SourceFile, const std::string &HWDeviceName, int ExtraHWFrames, int Track, bool VariableFormat, int Threads, int CacheMode, const std::filesystem::path &CachePath, const std::map<std::string, std::string> *LAVFOpts, const std::map<std::string, std::string> *LAVFStreamOpts, const std::map<std::string, std::string> *LAVCOpts, const ProgressFunction &Progress)
+BestVideoSource::BestVideoSource(const std::filesystem::path &SourceFile, const std::string &HWDeviceName, int ExtraHWFrames, int Track, bool VariableFormat, int Threads, int CacheMode, const std::filesystem::path &CachePath, int64_t IndexLimit, const std::map<std::string, std::string> *LAVFOpts, const std::map<std::string, std::string> *LAVFStreamOpts, const std::map<std::string, std::string> *LAVCOpts, const ProgressFunction &Progress)
     : Source(SourceFile), HWDevice(HWDeviceName), ExtraHWFrames(!HWDeviceName.empty() ? ExtraHWFrames : 0), VideoTrack(Track), VariableFormat(VariableFormat), Threads(Threads) {
     // Only make file path absolute if it exists to pass through special protocol paths
     std::error_code ec;
@@ -951,6 +951,8 @@ BestVideoSource::BestVideoSource(const std::filesystem::path &SourceFile, const 
     
     if (CacheMode < 0 || CacheMode > 2)
         throw BestSourceException("CacheMode must be between 0 and 2");
+    if (IndexLimit && CacheMode == bcmAlwaysWrite)
+        throw BestSourceException("Cannot write an incomplete Cache");
 
     std::unique_ptr<LWVideoDecoder> Decoder(new LWVideoDecoder(Source, HWDevice, ExtraHWFrames, VideoTrack, VariableFormat, Threads, LAVFOptions, LAVFStreamOptions, LAVCOptions));
 
@@ -969,10 +971,10 @@ BestVideoSource::BestVideoSource(const std::filesystem::path &SourceFile, const 
         TrackIndex.LastFrameDuration = PropFrame->duration;
         FrameCache.CacheFrame(0, PropFrame);
 
-        if (!IndexTrack(Decoder, Progress))
+        if (!IndexTrack(Decoder, IndexLimit, Progress))
             throw BestSourceException("Indexing of '" + Source.u8string() + "' track #" + std::to_string(VideoTrack) + " failed");
 
-        if (CacheMode == bcmAlwaysWrite || (CacheMode == bcmAuto && static_cast<int64_t>(TrackIndex.Frames.size()) >= SeekSearch)) {
+        if (CacheMode == bcmAlwaysWrite || (CacheMode == bcmAuto && !IndexLimit && static_cast<int64_t>(TrackIndex.Frames.size()) >= SeekSearch)) {
             if (!WriteVideoTrackIndex(CachePath))
                 throw BestSourceException("Failed to write index to '" + CachePath.u8string() + "' for track #" + std::to_string(VideoTrack));
         }
@@ -1077,7 +1079,7 @@ void BestVideoSource::SetSeekSearch(int64_t Frames) {
     SeekSearch = Frames;
 }
 
-bool BestVideoSource::IndexTrack(std::unique_ptr<LWVideoDecoder> &Decoder, const ProgressFunction &Progress) {
+bool BestVideoSource::IndexTrack(std::unique_ptr<LWVideoDecoder> &Decoder, int64_t limit, const ProgressFunction &Progress) {
     int64_t FileSize = Progress ? Decoder->GetSourceSize() : -1;
 
     TrackIndex.LastFrameDuration = 0;
@@ -1091,6 +1093,9 @@ bool BestVideoSource::IndexTrack(std::unique_ptr<LWVideoDecoder> &Decoder, const
     */
 
     while (true) {
+        if (limit && static_cast<int64_t>(TrackIndex.Frames.size()) >= limit)
+            break;
+
         AVFrame *F = Decoder->GetNextFrame();
         if (!F)
             break;
@@ -1306,7 +1311,7 @@ BestVideoFrame *BestVideoSource::SeekAndDecode(int64_t N, int64_t SeekFrame, std
 
 #ifndef NDEBUG
             if (MatchedN < SeekSearch)
-                BSDebugPrint("Seek destination determined to be within <SeekSearch> frames of start, this was unexpected", N, MatchedN, SeekSearch);
+                BSDebugPrint("Seek destination determined to be within <SeekSearch> frames of start, this was unexpected", N, MatchedN);
 #endif
 
             Decoder->SetFrameNumber(MatchedN + MatchFrames.size());
