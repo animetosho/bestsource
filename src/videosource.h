@@ -95,7 +95,7 @@ struct BSVideoProperties {
     int Rotation; /* A positive number in degrees */
 };
 
-struct LWVideoDecoder {
+class LWVideoDecoder {
 private:
     AVFormatContext *FormatContext = nullptr;
     AVCodecContext *CodecContext = nullptr;
@@ -207,8 +207,8 @@ private:
         std::vector<FrameInfo> Frames;
     };
 
-    bool WriteVideoTrackIndex(const std::filesystem::path &CachePath);
-    bool ReadVideoTrackIndex(const std::filesystem::path &CachePath);
+    bool WriteVideoTrackIndex(bool AbsolutePath, const std::filesystem::path &CachePath);
+    bool ReadVideoTrackIndex(bool AbsolutePath, const std::filesystem::path &CachePath);
 
     class Cache {
     private:

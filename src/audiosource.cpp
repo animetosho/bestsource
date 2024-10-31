@@ -55,7 +55,7 @@ bool LWAudioDecoder::DecodeNextFrame(bool SkipOutput) {
         int Ret = avcodec_receive_frame(CodecContext, DecodeFrame);
         if (Ret == 0) {
             return true;
-        } else if (Ret == AVERROR(EAGAIN)) {
+        } else if (Ret == AVERROR(EAGAIN) || Ret == AVERROR_INPUT_CHANGED) { // AVERROR_INPUT_CHANGED is only used for two things inside FFmpeg and the other one can't happen, therefore we don't need to care about whether or not variable format is allowed
             if (ReadPacket()) {
                 avcodec_send_packet(CodecContext, Packet);
                 av_packet_unref(Packet);
@@ -392,8 +392,8 @@ BestAudioSource::BestAudioSource(const std::filesystem::path &SourceFile, int Tr
     if (LAVFOpts)
         LAVFOptions = *LAVFOpts;
 
-    if (CacheMode < 0 || CacheMode > 2)
-        throw BestSourceException("CacheMode must be between 0 and 2");
+    if (CacheMode < 0 || CacheMode > 4)
+        throw BestSourceException("CacheMode must be between 0 and 4");
 
     std::unique_ptr<LWAudioDecoder> Decoder(new LWAudioDecoder(Source, AudioTrack, VariableFormat, Threads, LAVFOptions, DrcScale));
 
@@ -401,12 +401,12 @@ BestAudioSource::BestAudioSource(const std::filesystem::path &SourceFile, int Tr
     AudioTrack = Decoder->GetTrack();
     FileSize = Decoder->GetSourceSize();
 
-    if (CacheMode == bcmDisable || !ReadAudioTrackIndex(CachePath)) {
+    if (CacheMode == bcmDisable || !ReadAudioTrackIndex(IsAbsolutePathCacheMode(CacheMode), CachePath)) {
         if (!IndexTrack(Progress))
             throw BestSourceException("Indexing of '" + Source.u8string() + "' track #" + std::to_string(AudioTrack) + " failed");
 
-        if (CacheMode == bcmAlwaysWrite || (CacheMode == bcmAuto && TrackIndex.Frames.size() >= 100)) {
-            if (!WriteAudioTrackIndex(CachePath))
+        if (ShouldWriteIndex(CacheMode, TrackIndex.Frames.size())) {
+            if (!WriteAudioTrackIndex(IsAbsolutePathCacheMode(CacheMode), CachePath))
                 throw BestSourceException("Failed to write index to '" + CachePath.u8string() + "' for track #" + std::to_string(AudioTrack));
         }
     }
@@ -1063,8 +1063,8 @@ static AudioCompArray GetAudioCompArray(int64_t PTS, int64_t Length) {
     return Result;
 }
 
-bool BestAudioSource::WriteAudioTrackIndex(const std::filesystem::path &CachePath) {
-    file_ptr_t F = OpenCacheFile(CachePath, Source, AudioTrack, true);
+bool BestAudioSource::WriteAudioTrackIndex(bool AbsolutePath, const std::filesystem::path &CachePath) {
+    file_ptr_t F = OpenCacheFile(AbsolutePath, CachePath, Source, AudioTrack, true);
     if (!F)
         return false;
     WriteBSHeader(F, false);
@@ -1137,8 +1137,8 @@ bool BestAudioSource::WriteAudioTrackIndex(const std::filesystem::path &CachePat
     return true;
 }
 
-bool BestAudioSource::ReadAudioTrackIndex(const std::filesystem::path &CachePath) {
-    file_ptr_t F = OpenCacheFile(CachePath, Source, AudioTrack, false);
+bool BestAudioSource::ReadAudioTrackIndex(bool AbsolutePath, const std::filesystem::path &CachePath) {
+    file_ptr_t F = OpenCacheFile(AbsolutePath, CachePath, Source, AudioTrack, false);
     if (!F)
         return false;
     if (!ReadBSHeader(F, false))

@@ -100,7 +100,7 @@ bool LWVideoDecoder::DecodeNextFrame(bool SkipOutput) {
                 }
             }
             return true;
-        } else if (Ret == AVERROR(EAGAIN)) {
+        } else if (Ret == AVERROR(EAGAIN) || Ret == AVERROR_INPUT_CHANGED) { // AVERROR_INPUT_CHANGED is only used for two things inside FFmpeg and the other one can't happen, therefore we don't need to care about whether or not variable format is allowed
             if (ReadPacket()) {
                 avcodec_send_packet(CodecContext, Packet);
                 av_packet_unref(Packet);
@@ -949,8 +949,8 @@ BestVideoSource::BestVideoSource(const std::filesystem::path &SourceFile, const 
     if (ExtraHWFrames < 0)
         throw BestSourceException("ExtraHWFrames must be 0 or greater");
     
-    if (CacheMode < 0 || CacheMode > 2)
-        throw BestSourceException("CacheMode must be between 0 and 2");
+    if (CacheMode < 0 || CacheMode > 4)
+        throw BestSourceException("CacheMode must be between 0 and 4");
     if (IndexLimit && CacheMode == bcmAlwaysWrite)
         throw BestSourceException("Cannot write an incomplete Cache");
 
@@ -965,7 +965,7 @@ BestVideoSource::BestVideoSource(const std::filesystem::path &SourceFile, const 
     VideoTrack = Decoder->GetTrack();
     FileSize = Decoder->GetSourceSize();
 
-    if (CacheMode == bcmDisable || !ReadVideoTrackIndex(CachePath)) {
+    if (CacheMode == bcmDisable || !ReadVideoTrackIndex(IsAbsolutePathCacheMode(CacheMode), CachePath)) {
         // add first frame to the index
         TrackIndex.Frames.push_back({ PropFrame->pts, PropFrame->repeat_pict, !!(PropFrame->flags & AV_FRAME_FLAG_KEY), !!(PropFrame->flags & AV_FRAME_FLAG_TOP_FIELD_FIRST), GetHash(PropFrame) });
         TrackIndex.LastFrameDuration = PropFrame->duration;
@@ -974,8 +974,8 @@ BestVideoSource::BestVideoSource(const std::filesystem::path &SourceFile, const 
         if (!IndexTrack(Decoder, IndexLimit, Progress))
             throw BestSourceException("Indexing of '" + Source.u8string() + "' track #" + std::to_string(VideoTrack) + " failed");
 
-        if (CacheMode == bcmAlwaysWrite || (CacheMode == bcmAuto && !IndexLimit && static_cast<int64_t>(TrackIndex.Frames.size()) >= SeekSearch)) {
-            if (!WriteVideoTrackIndex(CachePath))
+        if (ShouldWriteIndex(CacheMode, TrackIndex.Frames.size(), SeekSearch) && !IndexLimit) {
+            if (!WriteVideoTrackIndex(IsAbsolutePathCacheMode(CacheMode), CachePath))
                 throw BestSourceException("Failed to write index to '" + CachePath.u8string() + "' for track #" + std::to_string(VideoTrack));
         }
     } else {
@@ -1557,8 +1557,8 @@ static VideoCompArray GetVideoCompArray(int64_t PTS, int RepeatPict, bool KeyFra
     return Result;
 }
 
-bool BestVideoSource::WriteVideoTrackIndex(const std::filesystem::path &CachePath) {
-    file_ptr_t F = OpenCacheFile(CachePath, Source, VideoTrack, true);
+bool BestVideoSource::WriteVideoTrackIndex(bool AbsolutePath, const std::filesystem::path &CachePath) {
+    file_ptr_t F = OpenCacheFile(AbsolutePath, CachePath, Source, VideoTrack, true);
     if (!F)
         return false;
     WriteBSHeader(F, true);
@@ -1634,8 +1634,8 @@ bool BestVideoSource::WriteVideoTrackIndex(const std::filesystem::path &CachePat
     return true;
 }
 
-bool BestVideoSource::ReadVideoTrackIndex(const std::filesystem::path &CachePath) {
-    file_ptr_t F = OpenCacheFile(CachePath, Source, VideoTrack, false);
+bool BestVideoSource::ReadVideoTrackIndex(bool AbsolutePath, const std::filesystem::path &CachePath) {
+    file_ptr_t F = OpenCacheFile(AbsolutePath, CachePath, Source, VideoTrack, false);
     if (!F)
         return false;
     if (!ReadBSHeader(F, true))

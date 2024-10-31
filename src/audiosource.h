@@ -55,7 +55,7 @@ struct BSAudioProperties {
     double StartTime; /* in seconds */
 };
 
-struct LWAudioDecoder {
+class LWAudioDecoder {
 private:
     AVFormatContext *FormatContext = nullptr;
     AVCodecContext *CodecContext = nullptr;
@@ -116,8 +116,8 @@ private:
         std::vector<FrameInfo> Frames;
     };
 
-    bool WriteAudioTrackIndex(const std::filesystem::path &CachePath);
-    bool ReadAudioTrackIndex(const std::filesystem::path &CachePath);
+    bool WriteAudioTrackIndex(bool AbsolutePath, const std::filesystem::path &CachePath);
+    bool ReadAudioTrackIndex(bool AbsolutePath, const std::filesystem::path &CachePath);
 
     class Cache {
     private:
