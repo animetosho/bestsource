@@ -951,7 +951,7 @@ BestVideoSource::BestVideoSource(const std::filesystem::path &SourceFile, const 
     
     if (CacheMode < 0 || CacheMode > 4)
         throw BestSourceException("CacheMode must be between 0 and 4");
-    if (IndexLimit && CacheMode == bcmAlwaysWrite)
+    if (IndexLimit && (CacheMode == bcmAlwaysWriteSubTree || CacheMode == bcmAlwaysAbsolutePath))
         throw BestSourceException("Cannot write an incomplete Cache");
 
     std::unique_ptr<LWVideoDecoder> Decoder(new LWVideoDecoder(Source, HWDevice, ExtraHWFrames, VideoTrack, VariableFormat, Threads, LAVFOptions, LAVFStreamOptions, LAVCOptions));
