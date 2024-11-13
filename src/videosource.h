@@ -125,9 +125,7 @@ public:
     [[nodiscard]] int GetTrack() const; // Useful when opening nth video track to get the actual number
     [[nodiscard]] int64_t GetFrameNumber() const; // The frame you will get when calling GetNextFrame()
     void SetFrameNumber(int64_t N); // Use after seeking to update internal frame number
-    void FillVideoPropertiesFromContext(LWVideoProperties &VP) const;
-    void FillVideoPropertiesFromFrame(LWVideoProperties &VP, AVFrame *PropFrame) const;
-    void GetVideoProperties(LWVideoProperties &VP); // Gets file level video properties, note that format and resolution information can only be retrieved by decoding a frame with GetNextFrame() and examining it 
+    void GetVideoProperties(LWVideoProperties &VP) const; // Gets file level video properties, note that format and resolution information can only be retrieved by decoding a frame with GetNextFrame() and examining it 
     [[nodiscard]] AVFrame *GetNextFrame();
     bool SkipFrames(int64_t Count);
     [[nodiscard]] bool HasMoreFrames() const;

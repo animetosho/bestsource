@@ -303,9 +303,8 @@ void LWVideoDecoder::SetFrameNumber(int64_t N) {
     CurrentFrame = N;
 }
 
-void LWVideoDecoder::FillVideoPropertiesFromContext(LWVideoProperties &VP) const {
-    VP.Width = CodecContext->width;
-    VP.Height = CodecContext->height;
+void LWVideoDecoder::GetVideoProperties(LWVideoProperties &VP) const {
+    VP = {};
 
     VP.FPS = CodecContext->framerate;
     // Set the framerate from the container if the codec framerate is invalid
@@ -414,39 +413,6 @@ void LWVideoDecoder::FillVideoPropertiesFromContext(LWVideoProperties &VP) const
                 VP.Rotation += 360;
         }
     }
-    
-    VP.VF.Set(av_pix_fmt_desc_get(CodecContext->pix_fmt));
-    VP.SSModWidth = CodecContext->width - (CodecContext->width % (1 << VP.VF.SubSamplingW));
-    VP.SSModHeight = CodecContext->height - (CodecContext->height % (1 << VP.VF.SubSamplingH));
-    VP.FieldBased = (CodecContext->field_order != AV_FIELD_PROGRESSIVE && CodecContext->field_order != AV_FIELD_UNKNOWN);
-    VP.TFF = (CodecContext->field_order == AV_FIELD_TT || CodecContext->field_order == AV_FIELD_TB);
-    VP.StartTime = 0;
-}
-
-void LWVideoDecoder::FillVideoPropertiesFromFrame(BSVideoProperties &VP, AVFrame *PropFrame) const {
-    assert(PropFrame);
-
-    VP.VF.Set(av_pix_fmt_desc_get(static_cast<AVPixelFormat>(PropFrame->format)));
-    VP.SSModWidth = CodecContext->width - (CodecContext->width % (1 << VP.VF.SubSamplingW));
-    VP.SSModHeight = CodecContext->height - (CodecContext->height % (1 << VP.VF.SubSamplingH));
-    VP.FieldBased = !!(PropFrame->flags & AV_FRAME_FLAG_INTERLACED);
-    VP.TFF = !!(PropFrame->flags & AV_FRAME_FLAG_TOP_FIELD_FIRST);
-
-    if (PropFrame->pts != AV_NOPTS_VALUE)
-        VP.StartTime = (static_cast<double>(FormatContext->streams[TrackNumber]->time_base.num) * PropFrame->pts) / FormatContext->streams[TrackNumber]->time_base.den;
-}
-
-void LWVideoDecoder::GetVideoProperties(BSVideoProperties &VP) {
-    assert(CurrentFrame == 0);
-    AVFrame *PropFrame = GetNextFrame();
-    assert(PropFrame);
-    if (!PropFrame)
-        return;
-
-    VP = {};
-    FillVideoPropertiesFromContext(VP);
-    FillVideoPropertiesFromFrame(VP, PropFrame);
-    av_frame_free(&PropFrame);
 }
 
 AVFrame *LWVideoDecoder::GetNextFrame() {
@@ -950,21 +916,11 @@ BestVideoSource::BestVideoSource(const std::filesystem::path &SourceFile, const 
 
     std::unique_ptr<LWVideoDecoder> Decoder(new LWVideoDecoder(Source, HWDevice, ExtraHWFrames, VideoTrack, Threads, LAVFOptions, LAVFStreamOptions, LAVCOptions));
 
-    AVFrame *PropFrame = Decoder->GetNextFrame();
-    if (!PropFrame)
-        throw BestSourceException("Failed to decode first frame of '" + Source.u8string() + "'");
-
-    Decoder->FillVideoPropertiesFromContext(VP);
-    Decoder->FillVideoPropertiesFromFrame(VP, PropFrame);
+    Decoder->GetVideoProperties(VP);
     VideoTrack = Decoder->GetTrack();
     FileSize = Decoder->GetSourceSize();
 
     if (CacheMode == bcmDisable || !ReadVideoTrackIndex(IsAbsolutePathCacheMode(CacheMode), CachePath)) {
-        // add first frame to the index
-        TrackIndex.Frames.push_back({ PropFrame->pts, PropFrame->repeat_pict, !!(PropFrame->flags & AV_FRAME_FLAG_KEY), !!(PropFrame->flags & AV_FRAME_FLAG_TOP_FIELD_FIRST), GetHash(PropFrame) });
-        TrackIndex.LastFrameDuration = PropFrame->duration;
-        FrameCache.CacheFrame(0, PropFrame);
-
         if (!IndexTrack(Decoder, IndexLimit, Progress))
             throw BestSourceException("Indexing of '" + Source.u8string() + "' track #" + std::to_string(VideoTrack) + " failed");
 
@@ -973,7 +929,6 @@ BestVideoSource::BestVideoSource(const std::filesystem::path &SourceFile, const 
                 throw BestSourceException("Failed to write index to '" + CachePath.u8string() + "' for track #" + std::to_string(VideoTrack));
         }
     } else {
-        FrameCache.CacheFrame(0, PropFrame);
         Decoders[0] = std::move(Decoder); // this may be re-usable
     }
 
