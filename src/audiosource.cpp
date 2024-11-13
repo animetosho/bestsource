@@ -70,7 +70,7 @@ bool LWAudioDecoder::DecodeNextFrame(bool SkipOutput) {
     return false;
 }
 
-void LWAudioDecoder::OpenFile(const std::filesystem::path &SourceFile, int Track, bool VariableFormat, int Threads, const std::map<std::string, std::string> &LAVFOpts, double DrcScale) {
+void LWAudioDecoder::OpenFile(const std::filesystem::path &SourceFile, int Track, int Threads, const std::map<std::string, std::string> &LAVFOpts, double DrcScale) {
     TrackNumber = Track;
 
     AVDictionary *Dict = nullptr;
@@ -134,12 +134,6 @@ void LWAudioDecoder::OpenFile(const std::filesystem::path &SourceFile, int Track
     }
     CodecContext->thread_count = Threads;
 
-    // FIXME, implement for newer ffmpeg versions
-    if (!VariableFormat) {
-        // Probably guard against mid-stream format changes
-        CodecContext->flags |= AV_CODEC_FLAG_DROPCHANGED;
-    }
-
     if (DrcScale < 0)
         throw BestSourceException("Invalid drc_scale value");
 
@@ -151,10 +145,10 @@ void LWAudioDecoder::OpenFile(const std::filesystem::path &SourceFile, int Track
         throw BestSourceException("Could not open audio codec");
 }
 
-LWAudioDecoder::LWAudioDecoder(const std::filesystem::path &SourceFile, int Track, bool VariableFormat, int Threads, const std::map<std::string, std::string> &LAVFOpts, double DrcScale) {
+LWAudioDecoder::LWAudioDecoder(const std::filesystem::path &SourceFile, int Track, int Threads, const std::map<std::string, std::string> &LAVFOpts, double DrcScale) {
     try {
         Packet = av_packet_alloc();
-        OpenFile(SourceFile, Track, VariableFormat, Threads, LAVFOpts, DrcScale);
+        OpenFile(SourceFile, Track, Threads, LAVFOpts, DrcScale);
     } catch (...) {
         Free();
         throw;
@@ -197,40 +191,15 @@ void LWAudioDecoder::SetFrameNumber(int64_t N, int64_t SampleNumber) {
     CurrentSample = SampleNumber;
 }
 
-void LWAudioDecoder::GetAudioProperties(BSAudioProperties &AP) {
-    assert(CurrentFrame == 0);
+void LWAudioDecoder::GetAudioProperties(LWAudioProperties &AP) {
     AP = {};
-    AVFrame *PropFrame = GetNextFrame();
-    assert(PropFrame);
-    if (!PropFrame)
-        return;
 
-    AP.AF.Set(PropFrame->format, CodecContext->bits_per_raw_sample);
-    AP.SampleRate = PropFrame->sample_rate;
-    AP.Channels = PropFrame->ch_layout.nb_channels;
-
-    if (PropFrame->ch_layout.order == AV_CHANNEL_ORDER_NATIVE) {
-        AP.ChannelLayout = PropFrame->ch_layout.u.mask;
-    } else if (PropFrame->ch_layout.order == AV_CHANNEL_ORDER_UNSPEC) {
-        AVChannelLayout ch = {};
-        av_channel_layout_default(&ch, PropFrame->ch_layout.nb_channels);
-        AP.ChannelLayout = ch.u.mask;
-    } else {
-        av_frame_free(&PropFrame);
-        throw BestSourceException("Ambisonics and custom channel orders not supported");
-    }
-
-    AP.NumSamples = (FormatContext->duration * PropFrame->sample_rate) / AV_TIME_BASE - FormatContext->streams[TrackNumber]->codecpar->initial_padding;
-    if (PropFrame->pts != AV_NOPTS_VALUE)
-        AP.StartTime = (static_cast<double>(FormatContext->streams[TrackNumber]->time_base.num) * PropFrame->pts) / FormatContext->streams[TrackNumber]->time_base.den;
-
-    av_frame_free(&PropFrame);
-
-    if (AP.AF.Bits <= 0) //FIXME, can this still happen?
-        throw BestSourceException("Codec returned zero size audio");
+    AP.Duration = FormatContext->streams[TrackNumber]->duration;
+    AP.TimeBase = FormatContext->streams[TrackNumber]->time_base;
+    AP.NumSamples = (FormatContext->duration * CodecContext->sample_rate) / AV_TIME_BASE - FormatContext->streams[TrackNumber]->codecpar->initial_padding;
 }
 
-AVFrame *LWAudioDecoder::GetNextFrame() {
+AVFrame *LWAudioDecoder::GetNextFrame(int *BitsPerSample) {
     if (DecodeSuccess) {
         DecodeSuccess = DecodeNextFrame();
         if (DecodeSuccess) {
@@ -238,6 +207,8 @@ AVFrame *LWAudioDecoder::GetNextFrame() {
             CurrentSample += DecodeFrame->nb_samples;
             AVFrame *Tmp = DecodeFrame;
             DecodeFrame = nullptr;
+            if (BitsPerSample)
+                *BitsPerSample = (CodecContext->bits_per_raw_sample > 0) ? CodecContext->bits_per_raw_sample : av_get_bytes_per_sample(static_cast<AVSampleFormat>(Tmp->format)) * 8;
             return Tmp;
         }
     }
@@ -283,11 +254,11 @@ void BSAudioFormat::Set(int Format, int BitsPerRawSample) {
     Bits = BitsPerRawSample ? BitsPerRawSample : (BytesPerSample * 8);
 }
 
-BestAudioFrame::BestAudioFrame(AVFrame *F) {
+BestAudioFrame::BestAudioFrame(AVFrame *F, int BitsPerSample) {
     assert(F);
     Frame = av_frame_clone(F);
 
-    AF.Set(F->format, 0); // FIXME, number of used bits is wrong for individual frames
+    AF.Set(F->format, BitsPerSample);
     NumChannels = F->ch_layout.nb_channels;
     Pts = Frame->pts;
     NumSamples = Frame->nb_samples;
@@ -337,6 +308,10 @@ BestAudioSource::Cache::CacheBlock::~CacheBlock() {
     av_frame_free(&Frame);
 }
 
+BestAudioSource::Cache::Cache(const AudioTrackIndex &TrackIndex) : TrackIndex(TrackIndex) {
+
+}
+
 void BestAudioSource::Cache::ApplyMaxSize() {
     while (Size > MaxSize) {
         Size -= Data.back().Size;
@@ -376,14 +351,14 @@ BestAudioFrame *BestAudioSource::Cache::GetFrame(int64_t N) {
         if (Iter->FrameNumber == N) {
             AVFrame *F = Iter->Frame;
             Data.splice(Data.begin(), Data, Iter);
-            return new BestAudioFrame(F);
+            return new BestAudioFrame(F, TrackIndex.Frames[N].BitsPerSample);
         }
     }
     return nullptr;
 }
 
-BestAudioSource::BestAudioSource(const std::filesystem::path &SourceFile, int Track, int AjustDelay, bool VariableFormat, int Threads, int CacheMode, const std::filesystem::path &CachePath, const std::map<std::string, std::string> *LAVFOpts, double DrcScale, const ProgressFunction &Progress)
-    : Source(SourceFile), AudioTrack(Track), VariableFormat(VariableFormat), DrcScale(DrcScale), Threads(Threads) {
+BestAudioSource::BestAudioSource(const std::filesystem::path &SourceFile, int Track, int AjustDelay, int Threads, int CacheMode, const std::filesystem::path &CachePath, const std::map<std::string, std::string> *LAVFOpts, double DrcScale, const ProgressFunction &Progress)
+    : Source(SourceFile), AudioTrack(Track), DrcScale(DrcScale), Threads(Threads), FrameCache(TrackIndex) {
     // Only make file path absolute if it exists to pass through special protocol paths
     std::error_code ec;
     if (std::filesystem::exists(SourceFile, ec))
@@ -395,7 +370,7 @@ BestAudioSource::BestAudioSource(const std::filesystem::path &SourceFile, int Tr
     if (CacheMode < 0 || CacheMode > 4)
         throw BestSourceException("CacheMode must be between 0 and 4");
 
-    std::unique_ptr<LWAudioDecoder> Decoder(new LWAudioDecoder(Source, AudioTrack, VariableFormat, Threads, LAVFOptions, DrcScale));
+    std::unique_ptr<LWAudioDecoder> Decoder(new LWAudioDecoder(Source, AudioTrack, Threads, LAVFOptions, DrcScale));
 
     Decoder->GetAudioProperties(AP);
     AudioTrack = Decoder->GetTrack();
@@ -411,9 +386,10 @@ BestAudioSource::BestAudioSource(const std::filesystem::path &SourceFile, int Tr
         }
     }
 
-    AP.NumFrames = TrackIndex.Frames.size();
-    AP.NumSamples = TrackIndex.Frames.back().Start + TrackIndex.Frames.back().Length;
+    InitializeFormatSets();
+    SelectFormatSet(-1);
 
+    // FIXME, rework delay adjustment
     if (AjustDelay >= -1)
         SampleDelay = static_cast<int64_t>(GetRelativeStartTime(AjustDelay) * AP.SampleRate);
 
@@ -435,26 +411,29 @@ void BestAudioSource::SetSeekPreRoll(int64_t Frames) {
 }
 
 bool BestAudioSource::IndexTrack(const ProgressFunction &Progress) {
-    std::unique_ptr<LWAudioDecoder> Decoder(new LWAudioDecoder(Source, AudioTrack, VariableFormat, Threads, LAVFOptions, DrcScale));
+    std::unique_ptr<LWAudioDecoder> Decoder(new LWAudioDecoder(Source, AudioTrack, Threads, LAVFOptions, DrcScale));
 
     int64_t FileSize = Progress ? Decoder->GetSourceSize() : -1;
-
-    // Fixme, implement frame discarding based on first seen format?
-    /*
-    bool First = true;
-    int Format = -1;
-    int Width = -1;
-    int Height = -1;
-    */
 
     int64_t NumSamples = 0;
 
     while (true) {
-        AVFrame *F = Decoder->GetNextFrame();
+        int BitsPerSample;
+        AVFrame *F = Decoder->GetNextFrame(&BitsPerSample);
         if (!F)
-            break;
+            break;  
 
-        TrackIndex.Frames.push_back({ F->pts, NumSamples, F->nb_samples, GetHash(F) });
+        if (F->ch_layout.order == AV_CHANNEL_ORDER_NATIVE) {
+            TrackIndex.Frames.push_back({ F->pts, NumSamples, F->nb_samples, F->format, BitsPerSample, F->sample_rate, F->ch_layout.nb_channels, F->ch_layout.u.mask, GetHash(F) });
+        } else if (F->ch_layout.order == AV_CHANNEL_ORDER_UNSPEC) {
+            AVChannelLayout ch = {};
+            av_channel_layout_default(&ch, F->ch_layout.nb_channels);
+            TrackIndex.Frames.push_back({ F->pts, NumSamples, F->nb_samples, F->format, BitsPerSample, F->sample_rate, F->ch_layout.nb_channels, ch.u.mask, GetHash(F) });
+        } else {
+            av_frame_free(&F);
+            throw BestSourceException("Ambisonics and custom channel orders not supported");
+        }
+
         NumSamples += F->nb_samples;
 
         av_frame_free(&F);
@@ -470,10 +449,52 @@ bool BestAudioSource::IndexTrack(const ProgressFunction &Progress) {
     return !TrackIndex.Frames.empty();
 }
 
+void BestAudioSource::InitializeFormatSets() {
+    std::map<std::tuple<int, int, int, int, uint64_t>, std::tuple<int64_t, int64_t, int64_t>> SeenSets;
+    for (const auto &Iter : TrackIndex.Frames) {
+        auto V = std::make_tuple(Iter.Format, Iter.BitsPerSample, Iter.SampleRate, Iter.Channels, Iter.ChannelLayout);
+        if (SeenSets.insert(std::make_pair(V, std::make_tuple(0, 0, Iter.PTS))).second)
+            FormatSets.push_back(FormatSet{ {}, Iter.Format, Iter.BitsPerSample, Iter.SampleRate, Iter.Channels, Iter.ChannelLayout });
+        std::get<0>(SeenSets[V])++;
+        std::get<1>(SeenSets[V]) += Iter.Length;
+    }
+
+    for (auto &Iter : FormatSets) {
+        auto V = std::make_tuple(Iter.Format, Iter.BitsPerSample, Iter.SampleRate, Iter.Channels, Iter.ChannelLayout);
+        Iter.NumFrames = std::get<0>(SeenSets[V]);
+        Iter.NumSamples = std::get<1>(SeenSets[V]);
+        if (std::get<2>(SeenSets[V]) != AV_NOPTS_VALUE)
+            Iter.StartTime = (static_cast<double>(AP.TimeBase.Num) * std::get<2>(SeenSets[V])) / AP.TimeBase.Den;
+        Iter.AF.Set(Iter.Format, Iter.BitsPerSample);
+    }
+
+    DefaultFormatSet = FormatSets[0];
+    DefaultFormatSet.NumFrames = TrackIndex.Frames.size();
+    DefaultFormatSet.NumSamples = 0;
+    for (const auto &Iter : FormatSets) {
+        DefaultFormatSet.NumSamples += Iter.NumSamples;
+
+        if (DefaultFormatSet.Format != Iter.Format || DefaultFormatSet.BitsPerSample != Iter.BitsPerSample) {
+            DefaultFormatSet.Format = AV_SAMPLE_FMT_NONE;
+            DefaultFormatSet.BitsPerSample = 0;
+        }
+
+        if (DefaultFormatSet.SampleRate != Iter.SampleRate)
+            DefaultFormatSet.SampleRate = 0;
+
+        if (DefaultFormatSet.Channels != Iter.Channels || DefaultFormatSet.ChannelLayout != Iter.ChannelLayout) {
+            DefaultFormatSet.Channels = 0;
+            DefaultFormatSet.ChannelLayout = 0;
+        }
+    }
+    if (DefaultFormatSet.Format != AV_SAMPLE_FMT_NONE) 
+        DefaultFormatSet.AF.Set(DefaultFormatSet.Format, DefaultFormatSet.BitsPerSample);
+}
+
 double BestAudioSource::GetRelativeStartTime(int Track) const {
     if (Track < 0) {
         try {
-            std::unique_ptr<LWVideoDecoder> Dec(new LWVideoDecoder(Source, "", 0, Track, true, 0, LAVFOptions, {}, {}));
+            std::unique_ptr<LWVideoDecoder> Dec(new LWVideoDecoder(Source, "", 0, Track, 0, LAVFOptions, {}, {}));
             BSVideoProperties VP;
             Dec->GetVideoProperties(VP);
             return AP.StartTime - VP.StartTime;
@@ -482,13 +503,13 @@ double BestAudioSource::GetRelativeStartTime(int Track) const {
         return 0;
     } else {
         try {
-            std::unique_ptr<LWVideoDecoder> Dec(new LWVideoDecoder(Source, "", 0, Track, true, 0, LAVFOptions, {}, {}));
+            std::unique_ptr<LWVideoDecoder> Dec(new LWVideoDecoder(Source, "", 0, Track, 0, LAVFOptions, {}, {}));
             BSVideoProperties VP;
             Dec->GetVideoProperties(VP);
             return AP.StartTime - VP.StartTime;
         } catch (BestSourceException &) {
             try {
-                std::unique_ptr<LWAudioDecoder> Dec(new LWAudioDecoder(Source, false, Track, Threads, LAVFOptions, 0));
+                std::unique_ptr<LWAudioDecoder> Dec(new LWAudioDecoder(Source, Track, Threads, LAVFOptions, 0));
                 BSAudioProperties AP2;
                 Dec->GetAudioProperties(AP2);
                 return AP.StartTime - AP2.StartTime;
@@ -503,6 +524,30 @@ const BSAudioProperties &BestAudioSource::GetAudioProperties() const {
     return AP;
 }
 
+const std::vector<BestAudioSource::FormatSet> &BestAudioSource::GetFormatSets() const {
+    return FormatSets;
+}
+
+void BestAudioSource::SelectFormatSet(int Index) {
+    if (Index >= static_cast<int>(FormatSets.size()) || Index < -1)
+        throw BestSourceException("Invalid format set");
+    VariableFormat = Index;
+    BestAudioSource::FormatSet &SrcSet = (Index < 0) ? DefaultFormatSet : FormatSets[Index];
+
+    AP.AF = SrcSet.AF;
+    AP.Format = SrcSet.Format;
+    AP.BitsPerSample = SrcSet.BitsPerSample;
+    AP.SampleRate = SrcSet.SampleRate;
+    AP.Channels = SrcSet.Channels;
+    AP.ChannelLayout = SrcSet.ChannelLayout;
+
+    AP.StartTime = SrcSet.StartTime;
+
+    AP.NumFrames = SrcSet.NumFrames;
+    AP.NumSamples = SrcSet.NumSamples;
+}
+
+
 // Short algorithm summary
 // 1. If a current decoder is close to the requested frame simply start from there
 //    Determine if a decoder is "close" based on whether or not it is already in the optimal zone based on the existing keyframes
@@ -516,6 +561,21 @@ const BSAudioProperties &BestAudioSource::GetAudioProperties() const {
 BestAudioFrame *BestAudioSource::GetFrame(int64_t N, bool Linear) {
     if (N < 0 || N >= AP.NumFrames)
         return nullptr;
+
+    // Adjust frame number if an output format is chosen
+    if (VariableFormat >= 0 && FormatSets.size() > 1) {
+        const auto &ActiveSet = FormatSets[VariableFormat];
+        int64_t UsableFrames = 0;
+        int64_t SourceN = N;
+        for (const auto &Iter : TrackIndex.Frames) {
+            if (Iter.Format != ActiveSet.Format || Iter.BitsPerSample != ActiveSet.BitsPerSample || Iter.SampleRate != ActiveSet.SampleRate || Iter.Channels != ActiveSet.Channels || Iter.ChannelLayout != ActiveSet.ChannelLayout) {
+                N++;
+            } else {
+                if (UsableFrames++ == SourceN)
+                    break;
+            }
+        }
+    }
 
     std::unique_ptr<BestAudioFrame> F(FrameCache.GetFrame(N));
     if (!F)
@@ -693,7 +753,7 @@ BestAudioFrame *BestAudioSource::SeekAndDecode(int64_t N, int64_t SeekFrame, std
 
                 if (FrameNumber >= N - PreRoll) {
                     if (FrameNumber == N)
-                        RetFrame = new BestAudioFrame(MatchFrames.GetFrame(FramesIdx));
+                        RetFrame = new BestAudioFrame(MatchFrames.GetFrame(FramesIdx), TrackIndex.Frames[N].BitsPerSample);
 
                     FrameCache.CacheFrame(FrameNumber, MatchFrames.GetFrame(FramesIdx, true));
                 }
@@ -747,7 +807,7 @@ BestAudioFrame *BestAudioSource::GetFrameInternal(int64_t N) {
 
     int Index = (EmptySlot >= 0) ? EmptySlot : LeastRecentlyUsed;
     if (!Decoders[Index])
-        Decoders[Index].reset(new LWAudioDecoder(Source, AudioTrack, VariableFormat, Threads, LAVFOptions, DrcScale));
+        Decoders[Index].reset(new LWAudioDecoder(Source, AudioTrack, Threads, LAVFOptions, DrcScale));
 
     DecoderLastUse[Index] = DecoderSequenceNum++;
 
@@ -772,7 +832,7 @@ BestAudioFrame *BestAudioSource::GetFrameLinearInternal(int64_t N, int64_t SeekF
     // If an empty slot exists simply spawn a new decoder there or reuse the least recently used decoder slot if no free ones exist
     if (Index < 0) {
         Index = (EmptySlot >= 0) ? EmptySlot : LeastRecentlyUsed;
-        Decoders[Index].reset(new LWAudioDecoder(Source, AudioTrack, VariableFormat, Threads, LAVFOptions, DrcScale));
+        Decoders[Index].reset(new LWAudioDecoder(Source, AudioTrack, Threads, LAVFOptions, DrcScale));
     }
 
     std::unique_ptr<LWAudioDecoder> &Decoder = Decoders[Index];
@@ -817,7 +877,7 @@ BestAudioFrame *BestAudioSource::GetFrameLinearInternal(int64_t N, int64_t SeekF
             }
 
             if (FrameNumber == N)
-                RetFrame = new BestAudioFrame(Frame);
+                RetFrame = new BestAudioFrame(Frame, TrackIndex.Frames[N].BitsPerSample);
 
             FrameCache.CacheFrame(FrameNumber, Frame);
         } else if (FrameNumber < N) {
@@ -987,7 +1047,8 @@ bool BestAudioSource::FillInFramePlanar(const BestAudioFrame *Frame, int64_t Fra
 }
 
 void BestAudioSource::GetPackedAudio(uint8_t *Data, int64_t Start, int64_t Count) {
-    if (VariableFormat)
+    // FIXME, relax the restriction to only requiring the same format within the range if anyone complains
+    if (AP.Format == 0 || AP.BitsPerSample == 0 || AP.Channels == 0 || AP.ChannelLayout == 0 || AP.SampleRate == 0)
         throw BestSourceException("GetPackedAudio() can only be used when variable format is disabled");
 
     Start -= SampleDelay;
@@ -1017,7 +1078,7 @@ void BestAudioSource::GetPackedAudio(uint8_t *Data, int64_t Start, int64_t Count
 }
 
 void BestAudioSource::GetPlanarAudio(uint8_t *const *const Data, int64_t Start, int64_t Count) {
-    if (VariableFormat)
+    if (AP.Format == 0 || AP.BitsPerSample == 0 || AP.Channels == 0 || AP.ChannelLayout == 0 || AP.SampleRate == 0)
         throw BestSourceException("GetPlanarAudio() can only be used when variable format is disabled");
 
     Start -= SampleDelay;
@@ -1054,13 +1115,21 @@ void BestAudioSource::GetPlanarAudio(uint8_t *const *const Data, int64_t Start, 
 ////////////////////////////////////////
 // Index read/write
 
-typedef std::array<uint8_t, 16> AudioCompArray;
+typedef std::array<uint8_t, sizeof(int64_t) + sizeof(int64_t) + sizeof(int) + sizeof(int) + sizeof(int) + sizeof(int) + sizeof(uint64_t)> AudioCompArray;
 
-static AudioCompArray GetAudioCompArray(int64_t PTS, int64_t Length) {
+static AudioCompArray GetAudioCompArray(int64_t PTS, int64_t Length, int Format, int BitsPerSample, int SampleRate, int Channels, uint64_t ChannelLayout) {
     AudioCompArray Result;
     memcpy(Result.data(), &PTS, sizeof(PTS));
     memcpy(Result.data() + sizeof(PTS), &Length, sizeof(Length));
-    return Result;
+    memcpy(Result.data() + sizeof(PTS) + sizeof(Length), &Format, sizeof(Format));
+    memcpy(Result.data() + sizeof(PTS) + sizeof(Length) + sizeof(Format), &BitsPerSample, sizeof(BitsPerSample));
+    memcpy(Result.data() + sizeof(PTS) + sizeof(Length) + sizeof(Format) + sizeof(BitsPerSample), &SampleRate, sizeof(SampleRate));
+    memcpy(Result.data() + sizeof(PTS) + sizeof(Length) + sizeof(Format) + sizeof(BitsPerSample) + sizeof(SampleRate), &Channels, sizeof(Channels));
+    memcpy(Result.data() + sizeof(PTS) + sizeof(Length) + sizeof(Format) + sizeof(BitsPerSample) + sizeof(SampleRate) + sizeof(Channels), &ChannelLayout, sizeof(ChannelLayout));
+
+    static_assert(sizeof(PTS) + sizeof(Length) + sizeof(Format) + sizeof(BitsPerSample) + sizeof(SampleRate) + sizeof(Channels) + sizeof(ChannelLayout) == sizeof(AudioCompArray));
+
+    return Result;    
 }
 
 bool BestAudioSource::WriteAudioTrackIndex(bool AbsolutePath, const std::filesystem::path &CachePath) {
@@ -1070,7 +1139,6 @@ bool BestAudioSource::WriteAudioTrackIndex(bool AbsolutePath, const std::filesys
     WriteBSHeader(F, false);
     WriteInt64(F, FileSize);
     WriteInt(F, AudioTrack);
-    WriteInt(F, VariableFormat);
     WriteDouble(F, DrcScale);
 
     WriteInt(F, static_cast<int>(LAVFOptions.size()));
@@ -1096,7 +1164,7 @@ bool BestAudioSource::WriteAudioTrackIndex(bool AbsolutePath, const std::filesys
             LastPTSValue = OrigPTS;
         }
 
-        Dict.insert(std::make_pair(GetAudioCompArray(PTS, Iter.Length), 0));
+        Dict.insert(std::make_pair(GetAudioCompArray(PTS, Iter.Length, Iter.Format, Iter.BitsPerSample, Iter.SampleRate, Iter.Channels, Iter.ChannelLayout), 0));
     }
 
     // Only bother with a dictionary if it's not too big
@@ -1121,7 +1189,7 @@ bool BestAudioSource::WriteAudioTrackIndex(bool AbsolutePath, const std::filesys
                 LastPTSValue = OrigPTS;
             }
 
-            WriteByte(F, Dict[GetAudioCompArray(PTS, Iter.Length)]);
+            WriteByte(F, Dict[GetAudioCompArray(PTS, Iter.Length, Iter.Format, Iter.BitsPerSample, Iter.SampleRate, Iter.Channels, Iter.ChannelLayout)]);
             fwrite(Iter.Hash.data(), 1, Iter.Hash.size(), F.get());
         }
     } else {
@@ -1131,6 +1199,11 @@ bool BestAudioSource::WriteAudioTrackIndex(bool AbsolutePath, const std::filesys
             fwrite(Iter.Hash.data(), 1, Iter.Hash.size(), F.get());
             WriteInt64(F, Iter.PTS);
             WriteInt64(F, Iter.Length);
+            WriteInt(F, Iter.Format);
+            WriteInt(F, Iter.BitsPerSample);
+            WriteInt(F, Iter.SampleRate);
+            WriteInt(F, Iter.Channels);
+            WriteInt64(F, Iter.ChannelLayout);
         }
     }
 
@@ -1146,8 +1219,6 @@ bool BestAudioSource::ReadAudioTrackIndex(bool AbsolutePath, const std::filesyst
     if (!ReadCompareInt64(F, FileSize))
         return false;
     if (!ReadCompareInt(F, AudioTrack))
-        return false;
-    if (!ReadCompareInt(F, VariableFormat))
         return false;
     if (!ReadCompareDouble(F, DrcScale))
         return false;
@@ -1174,6 +1245,11 @@ bool BestAudioSource::ReadAudioTrackIndex(bool AbsolutePath, const std::filesyst
             FrameInfo FI = {};
             FI.PTS = ReadInt64(F);
             FI.Length = ReadInt64(F);
+            FI.Format = ReadInt(F);
+            FI.BitsPerSample = ReadInt(F);
+            FI.SampleRate = ReadInt(F);
+            FI.Channels = ReadInt(F);
+            FI.ChannelLayout = ReadInt64(F);
             Dict[i] = FI;
         }
 
@@ -1197,6 +1273,11 @@ bool BestAudioSource::ReadAudioTrackIndex(bool AbsolutePath, const std::filesyst
             FI.PTS = ReadInt64(F);
             FI.Start = AP.NumSamples;
             FI.Length = ReadInt64(F);
+            FI.Format = ReadInt(F);
+            FI.BitsPerSample = ReadInt(F);
+            FI.SampleRate = ReadInt(F);
+            FI.Channels = ReadInt(F);
+            FI.ChannelLayout = ReadInt64(F);
             AP.NumSamples += FI.Length;
             TrackIndex.Frames.push_back(FI);
         }

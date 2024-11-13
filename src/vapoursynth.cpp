@@ -155,7 +155,9 @@ static void VS_CC CreateBestVideoSource(const VSMap *In, VSMap *Out, void *, VSC
     int Track = vsapi->mapGetIntSaturated(In, "track", 0, &err);
     if (err)
         Track = -1;
-    bool VariableFormat = !!vsapi->mapGetInt(In, "variableformat", 0, &err);
+    int VariableFormat = vsapi->mapGetIntSaturated(In, "variableformat", 0, &err);
+    if (err)
+        VariableFormat = -1;
     int Threads = vsapi->mapGetIntSaturated(In, "threads", 0, &err);
     int StartNumber = vsapi->mapGetIntSaturated(In, "start_number", 0, &err);
     if (err)
@@ -208,7 +210,7 @@ static void VS_CC CreateBestVideoSource(const VSMap *In, VSMap *Out, void *, VSC
         if (ShowProgress) {
             auto NextUpdate = std::chrono::high_resolution_clock::now();
             int LastValue = -1;
-            D->V.reset(new BestVideoSource(Source, HWDevice ? HWDevice : "", ExtraHWFrames, Track, VariableFormat, Threads, CacheMode, CachePath ? CachePath : "", IndexLimit, &Opts, &StreamOpts, &CodecOpts,
+            D->V.reset(new BestVideoSource(Source, HWDevice ? HWDevice : "", ExtraHWFrames, Track, Threads, CacheMode, CachePath ? CachePath : "", IndexLimit, &Opts, &StreamOpts, &CodecOpts,
                 [vsapi, Core, &NextUpdate, &LastValue](int Track, int64_t Cur, int64_t Total) {
                     if (NextUpdate < std::chrono::high_resolution_clock::now()) {
                         if (Total == INT64_MAX && Cur == Total) {
@@ -226,16 +228,16 @@ static void VS_CC CreateBestVideoSource(const VSMap *In, VSMap *Out, void *, VSC
                 }));
 
         } else {
-            D->V.reset(new BestVideoSource(Source, HWDevice ? HWDevice : "", ExtraHWFrames, Track, VariableFormat, Threads, CacheMode, CachePath ? CachePath : "", IndexLimit, &Opts, &StreamOpts, &CodecOpts));
+            D->V.reset(new BestVideoSource(Source, HWDevice ? HWDevice : "", ExtraHWFrames, Track, Threads, CacheMode, CachePath ? CachePath : "", IndexLimit, &Opts, &StreamOpts, &CodecOpts));
         }
 
+        D->V->SelectFormatSet(VariableFormat);
+
         const BSVideoProperties &VP = D->V->GetVideoProperties();
-        if (VP.VF.ColorFamily == 0 || !vsapi->queryVideoFormat(&D->VI.format, VP.VF.ColorFamily, VP.VF.Float, VP.VF.Bits, VP.VF.SubSamplingW, VP.VF.SubSamplingH, Core))
+        if ((VP.VF.ColorFamily == 0 && VariableFormat != -1) || !vsapi->queryVideoFormat(&D->VI.format, VP.VF.ColorFamily, VP.VF.Float, VP.VF.Bits, VP.VF.SubSamplingW, VP.VF.SubSamplingH, Core))
             throw BestSourceException("Unsupported video format from decoder (probably less than 8 bit or palette)");
         D->VI.width = VP.SSModWidth;
         D->VI.height = VP.SSModHeight;
-        if (VariableFormat)
-            D->VI = {};
         D->VI.numFrames = vsh::int64ToIntS(VP.NumFrames);
         D->VI.fpsNum = VP.FPS.Num;
         D->VI.fpsDen = VP.FPS.Den;
@@ -349,7 +351,7 @@ static void VS_CC CreateBestAudioSource(const VSMap *In, VSMap *Out, void *, VSC
         if (ShowProgress) {
             auto NextUpdate = std::chrono::high_resolution_clock::now();
             int LastValue = -1;
-            D->A.reset(new BestAudioSource(Source, Track, AdjustDelay, false, Threads, CacheMode, CachePath ? CachePath : "", &Opts, DrcScale,
+            D->A.reset(new BestAudioSource(Source, Track, AdjustDelay, Threads, CacheMode, CachePath ? CachePath : "", &Opts, DrcScale,
                 [vsapi, Core, &NextUpdate, &LastValue](int Track, int64_t Cur, int64_t Total) {
                     if (NextUpdate < std::chrono::high_resolution_clock::now()) {
                         if (Total == INT64_MAX && Cur == Total) {
@@ -367,8 +369,10 @@ static void VS_CC CreateBestAudioSource(const VSMap *In, VSMap *Out, void *, VSC
                 }));
 
         } else {
-            D->A.reset(new BestAudioSource(Source, Track, AdjustDelay, false, Threads, CacheMode, CachePath ? CachePath : "", &Opts, DrcScale));
+            D->A.reset(new BestAudioSource(Source, Track, AdjustDelay, Threads, CacheMode, CachePath ? CachePath : "", &Opts, DrcScale));
         }
+
+        D->A->SelectFormatSet(0);
 
         const BSAudioProperties &AP = D->A->GetAudioProperties();
         D->Is8Bit = (AP.AF.Bits <= 8);

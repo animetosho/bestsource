@@ -45,13 +45,23 @@ struct BSAudioFormat {
     void Set(int Format, int BitsPerRawSample);
 };
 
-struct BSAudioProperties {
+struct LWAudioProperties {
+    BSRational TimeBase;
+    int64_t Duration;
+
+    int64_t NumSamples; /* estimated by decoder, may be wrong */
+};
+
+struct BSAudioProperties : public LWAudioProperties {
     BSAudioFormat AF;
+    int Format;
+    int BitsPerSample; // fixme, redundant?
     int SampleRate;
     int Channels;
     uint64_t ChannelLayout;
-    int64_t NumFrames; // can be -1 to signal that the number of frames is completely unknown
-    int64_t NumSamples; /* estimated by decoder, may be wrong */
+
+    int64_t NumFrames;
+
     double StartTime; /* in seconds */
 };
 
@@ -67,12 +77,12 @@ private:
     AVPacket *Packet = nullptr;
     bool Seeked = false;
 
-    void OpenFile(const std::filesystem::path &SourceFile, int Track, bool VariableFormat, int Threads, const std::map<std::string, std::string> &LAVFOpts, double DrcScale);
+    void OpenFile(const std::filesystem::path &SourceFile, int Track, int Threads, const std::map<std::string, std::string> &LAVFOpts, double DrcScale);
     bool ReadPacket();
     bool DecodeNextFrame(bool SkipOutput = false);
     void Free();
 public:
-    LWAudioDecoder(const std::filesystem::path &SourceFile, int Track, bool VariableFormat, int Threads, const std::map<std::string, std::string> &LAVFOpts, double DrcScale); // Positive track numbers are absolute. Negative track numbers mean nth audio track to simplify things.
+    LWAudioDecoder(const std::filesystem::path &SourceFile, int Track, int Threads, const std::map<std::string, std::string> &LAVFOpts, double DrcScale); // Positive track numbers are absolute. Negative track numbers mean nth audio track to simplify things.
     ~LWAudioDecoder();
     [[nodiscard]] int64_t GetSourceSize() const;
     [[nodiscard]] int64_t GetSourcePostion() const;
@@ -80,8 +90,8 @@ public:
     [[nodiscard]] int64_t GetFrameNumber() const; // The frame you will get when calling GetNextFrame()
     [[nodiscard]] int64_t GetSamplePos() const; // The frame you will get when calling GetNextFrame()
     void SetFrameNumber(int64_t N, int64_t SampleNumber); // Use after seeking to update internal frame number
-    void GetAudioProperties(BSAudioProperties &VP); // Decodes one frame and advances the position to retrieve the full properties, only call directly after creation
-    [[nodiscard]] AVFrame *GetNextFrame();
+    void GetAudioProperties(LWAudioProperties &VP); // Decodes one frame and advances the position to retrieve the full properties, only call directly after creation
+    [[nodiscard]] AVFrame *GetNextFrame(int *BitsPerSample = nullptr);
     bool SkipFrames(int64_t Count);
     [[nodiscard]] bool HasMoreFrames() const;
     [[nodiscard]] bool Seek(int64_t PTS); // Note that the current frame number isn't updated and if seeking fails the decoder is in an undefined state
@@ -93,7 +103,7 @@ class BestAudioFrame {
 private:
     AVFrame *Frame;
 public:
-    BestAudioFrame(AVFrame *Frame);
+    BestAudioFrame(AVFrame *Frame, int BitsPerSample);
     ~BestAudioFrame();
     [[nodiscard]] const AVFrame *GetAVFrame() const;
     BSAudioFormat AF;
@@ -105,10 +115,29 @@ public:
 
 class BestAudioSource {
 public:
+    struct FormatSet {
+        BSAudioFormat AF = {};
+        int Format;
+        int BitsPerSample; // FIXME, maybe redundant
+        int SampleRate;
+        int Channels;
+        uint64_t ChannelLayout;
+
+        double StartTime = 0;
+
+        int64_t NumFrames; // can be -1 to signal that the number of frames is completely unknown
+        int64_t NumSamples;
+    };
+
     struct FrameInfo {
         int64_t PTS;
         int64_t Start;
         int64_t Length;
+        int Format;
+        int BitsPerSample;
+        int SampleRate;
+        int Channels;
+        uint64_t ChannelLayout;
         std::array<uint8_t, HashSize> Hash;
     };
 private:
@@ -130,11 +159,13 @@ private:
             ~CacheBlock();
         };
 
+        const AudioTrackIndex &TrackIndex;
         size_t Size = 0;
         size_t MaxSize = 1024 * 1024 * 1024;
         std::list<CacheBlock> Data;
         void ApplyMaxSize();
     public:
+        Cache(const AudioTrackIndex &TrackIndex);
         void Clear();
         void SetMaxSize(size_t Bytes);
         void CacheFrame(int64_t FrameNumber, AVFrame *Frame); // Takes ownership of Frame
@@ -144,13 +175,16 @@ private:
     AudioTrackIndex TrackIndex;
     Cache FrameCache;
 
+    std::vector<FormatSet> FormatSets;
+    FormatSet DefaultFormatSet;
+
     static constexpr int MaxVideoSources = 4;
     std::map<std::string, std::string> LAVFOptions;
     double DrcScale;
     BSAudioProperties AP = {};
     std::filesystem::path Source;
     int AudioTrack;
-    bool VariableFormat;
+    int VariableFormat = -1;
     int Threads;
     bool LinearMode = false;
     uint64_t DecoderSequenceNum = 0;
@@ -167,6 +201,7 @@ private:
     [[nodiscard]] BestAudioFrame *GetFrameInternal(int64_t N);
     [[nodiscard]] BestAudioFrame *GetFrameLinearInternal(int64_t N, int64_t SeekFrame = -1, size_t Depth = 0, bool ForceUnseeked = false);
     [[nodiscard]] bool IndexTrack(const ProgressFunction &Progress = nullptr);
+    void InitializeFormatSets();
     void ZeroFillStartPacked(uint8_t *&Data, int64_t &Start, int64_t &Count);
     void ZeroFillEndPacked(uint8_t *Data, int64_t Start, int64_t &Count);
     bool FillInFramePacked(const BestAudioFrame *Frame, int64_t FrameStartSample, uint8_t *&Data, int64_t &Start, int64_t &Count);
@@ -180,12 +215,14 @@ public:
         int64_t FirstSamplePos;
     };
 
-    BestAudioSource(const std::filesystem::path &SourceFile, int Track, int AjustDelay, bool VariableFormat, int Threads, int CacheMode, const std::filesystem::path &CachePath, const std::map<std::string, std::string> *LAVFOpts, double DrcScale, const ProgressFunction &Progress = nullptr);
+    BestAudioSource(const std::filesystem::path &SourceFile, int Track, int AjustDelay, int Threads, int CacheMode, const std::filesystem::path &CachePath, const std::map<std::string, std::string> *LAVFOpts, double DrcScale, const ProgressFunction &Progress = nullptr);
     [[nodiscard]] int GetTrack() const; // Useful when opening nth video track to get the actual number
     void SetMaxCacheSize(size_t Bytes); /* default max size is 1GB */
     void SetSeekPreRoll(int64_t Frames); /* the number of frames to cache before the position being fast forwarded to */
     double GetRelativeStartTime(int Track) const;
     [[nodiscard]] const BSAudioProperties &GetAudioProperties() const;
+    [[nodiscard]] const std::vector<FormatSet> &GetFormatSets() const; /* Get a listing of all the number of formats  */
+    void SelectFormatSet(int Index); /* Sets the output format to the specified format set, passing -1 means the default variable format will be used */
     [[nodiscard]] BestAudioFrame *GetFrame(int64_t N, bool Linear = false);
     [[nodiscard]] FrameRange GetFrameRangeBySamples(int64_t Start, int64_t Count) const;
     void GetPackedAudio(uint8_t *Data, int64_t Start, int64_t Count);
