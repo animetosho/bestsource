@@ -331,10 +331,11 @@ void LWVideoDecoder::GetVideoProperties(LWVideoProperties &VP) const {
 
     // Set AR variables
     VP.SAR = CodecContext->sample_aspect_ratio;
+    VP.StreamSAR = FormatContext->streams[TrackNumber]->sample_aspect_ratio;
 
     // Set the SAR from the container if the codec SAR is invalid
     if (VP.SAR.Num <= 0 || VP.SAR.Den <= 0)
-        VP.SAR = FormatContext->streams[TrackNumber]->sample_aspect_ratio;
+        VP.SAR = VP.StreamSAR;
 
     // Set stereoscopic 3d type
     VP.Stereo3DType = AV_STEREO3D_2D;

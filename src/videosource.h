@@ -56,6 +56,7 @@ struct LWVideoProperties {
 
     BSRational FPS;
     BSRational SAR;
+    BSRational StreamSAR;
 
     /* Stereo 3D */
     int Stereo3DType;

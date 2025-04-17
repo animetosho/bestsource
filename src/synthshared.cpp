@@ -27,6 +27,10 @@ void SetSynthFrameProperties(const std::unique_ptr<BestVideoFrame> &Src, const B
         mapSetInt("_SARNum", VP.SAR.Num);
         mapSetInt("_SARDen", VP.SAR.Den);
     }
+    if (VP.StreamSAR.Num > 0 && VP.StreamSAR.Den > 0) {
+        mapSetInt("_StreamSARNum", VP.StreamSAR.Num);
+        mapSetInt("_StreamSARDen", VP.StreamSAR.Den);
+    }
 
     mapSetInt("_Matrix", Src->Matrix);
     mapSetInt("_Primaries", Src->Primaries);

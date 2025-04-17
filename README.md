@@ -8,6 +8,7 @@ Modifications made in this fork to the `VideoSource` function:
 * cache first few decoded frames during indexing (dependent on `cachesize`) instead of discarding all of them
 * add a `seeksearch` parameter. BestSource uses a hard-coded value of '100' frames when trying to determine seek locations, and the number of frames from the start to force linear decoding. This parameter allows one to alter this arbitrary threshold to suit one's needs
 * add parameter `index_limit` which limits the number of frames when constructing the index. If used, the cache file will never be written (hence cannot be used with `cachemode=2` or `4`), but will be ignored if a cache file is loaded. If this option is applied, the returned clip will have no more than the frame limit.
+* add stream sample aspect ratio to frame properties via `frame.props['_StreamSARNum']` and `frame.props['_StreamSARDen']`, as the frame sourced SAR may sometimes be unreliable
 * *libbestsource* is statically linked by default
 
 ## Image Benchmark
